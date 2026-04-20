@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$/third_party/MoGe" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/MoGe/third_party/diff-gaussian-rasterization" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/MoGe/third_party/diff-gaussian-rasterization/third_party/glm" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/accelerated_features" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/diff-gaussian-rasterization" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/diff-gaussian-rasterization/third_party/glm" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/gaussian-splatting" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/gaussian-splatting/SIBR_viewers" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/gaussian-splatting/submodules/diff-gaussian-rasterization" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/gaussian-splatting/submodules/fused-ssim" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/gaussian-splatting/submodules/simple-knn" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/third_party/nerf-navigation" vcs="Git" />
+  </component>
+</project>
