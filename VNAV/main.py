@@ -6,10 +6,10 @@ from PIL import Image
 # Ensure the parent directory is in the Python path to allow `import VNAV.*`
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from VNAV.scenes import GaussianScene, MeshScene
-from VNAV.cameras import Camera
-from VNAV.control import visual_servoing_loop
-from VNAV.controllers.fbvs import FBVSController
+from scenes import GaussianScene, MeshScene
+from cameras import Camera
+from control import visual_servoing_loop
+from controllers.fbvs import FBVSController
 
 def run_3dgs_colmap():
     """
@@ -25,22 +25,24 @@ def run_3dgs_colmap():
     import pycolmap
     print(f"Loading COLMAP reconstruction from {reconstruction_path}...")
     reconstruction = pycolmap.Reconstruction(reconstruction_path)
-    posed_images = list(reconstruction.images.values())
-    
+
+    # Sort images by their filename (name) to guarantee temporal and spatial sequentiality
+    posed_images = sorted(reconstruction.images.values(), key=lambda img: img.name)
+
     # 1. Pick Start Pose
-    start_index = 89
+    start_index = 0
     start_image = posed_images[start_index]
     colmap_camera_id = start_image.camera_id
-    
+
     colmap_cameras_path = os.path.join(reconstruction_path, "cameras.bin")
     colmap_images_path = os.path.join(reconstruction_path, "images.bin")
-    
+
     print(f"Initial Pose: '{start_image.name}' (Camera ID: {colmap_camera_id})")
     cam = Camera.from_colmap(colmap_cameras_path, camera_id=colmap_camera_id)
     cam.set_pose_from_colmap(colmap_images_path, image_name=start_image.name)
-    
-    # 2. Pick Target Image
-    target_index = 95  # A few frames away to create a displacement error
+
+    # 2. Pick Target Image and Target Pose
+    target_index = start_index + 10  # Now guaranteed to be the next spatial frame!
     target_image_info = posed_images[target_index]
     target_image_path = os.path.join(images_dir, target_image_info.name)
     print(f"Target Image: '{target_image_info.name}'")
@@ -49,17 +51,22 @@ def run_3dgs_colmap():
         real_target_img = np.array(Image.open(target_image_path).convert("RGB"))
     except FileNotFoundError:
         print(f"Error: Real target image '{target_image_path}' not found.")
-        return
+        return None, None, None, None
+
+    # Load target pose
+    target_cam = Camera.from_colmap(colmap_cameras_path, camera_id=target_image_info.camera_id)
+    target_cam.set_pose_from_colmap(colmap_images_path, image_name=target_image_info.name)
+    target_pose = target_cam.pose
 
     # 3. Initialize Scene
     print("Initializing Gaussian Scene...")
     scene = GaussianScene(width=cam.width, height=cam.height)
     if not os.path.exists(gs_path):
         print(f"Please update paths. '{gs_path}' not found.")
-        return
+        return None, None, None, None
     scene.load(gs_path)
     
-    return scene, cam, real_target_img
+    return scene, cam, real_target_img, target_pose
 
 
 def run_mesh_scannet():
@@ -72,6 +79,7 @@ def run_mesh_scannet():
     info_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/info.txt"
     start_pose_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000631.pose.txt"
     target_image_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000640.color.jpg"
+    target_pose_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000640.pose.txt"
     
     # 1. Initialize Camera with Intrinsics from info.txt
     print("Loading Intrinsics...")
@@ -87,17 +95,26 @@ def run_mesh_scannet():
         real_target_img = np.array(Image.open(target_image_path).convert("RGB"))
     except FileNotFoundError:
         print(f"Error: Real target image '{target_image_path}' not found.")
-        return None, None, None
+        return None, None, None, None
+
+    # Load target pose
+    target_cam = Camera.from_dataset_info(info_path, sensor_type='color')
+    try:
+        target_cam.set_pose_from_scannet(target_pose_path)
+        target_pose = target_cam.pose
+    except FileNotFoundError:
+        print(f"Warning: Target pose '{target_pose_path}' not found. Distance metrics will not be available.")
+        target_pose = None
 
     # 4. Initialize Scene
     print("Initializing Mesh Scene...")
     scene = MeshScene(width=cam.width, height=cam.height)
     if not os.path.exists(mesh_path):
         print(f"Please update paths. '{mesh_path}' not found.")
-        return None, None, None
+        return None, None, None, None
     scene.load(mesh_path)
     
-    return scene, cam, real_target_img
+    return scene, cam, real_target_img, target_pose
 
 
 def main():
@@ -107,10 +124,10 @@ def main():
     # =========================================================================
     
     # [Option A] Run with 3DGS and COLMAP poses
-    scene, cam, real_target_img = run_3dgs_colmap()
+    # scene, cam, real_target_img, target_pose = run_3dgs_colmap()
     
     # [Option B] Run with Mesh and ScanNet poses
-    # scene, cam, real_target_img = run_mesh_scannet()
+    scene, cam, real_target_img, target_pose = run_mesh_scannet()
     
     if scene is None or cam is None or real_target_img is None:
         print("Failed to initialize setup.")
@@ -137,6 +154,7 @@ def main():
         camera=cam,
         target_image=real_target_img,
         controller=controller,
+        target_pose=target_pose,
         max_iterations=300,
         dt=0.1
     )

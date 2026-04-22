@@ -21,6 +21,7 @@ class FBVSController(BaseController):
         self.max_velocity = max_velocity
         self.use_moge = use_moge
         self.current_error_norm = 0.0
+        self.current_matches = (np.array([]), np.array([]))
         
         print("Initializing FBVS Controller...")
         # 1. Default Feature Extractor: XFeat
@@ -33,12 +34,77 @@ class FBVSController(BaseController):
         else:
             self.depth_estimator = None
             
-    def compute_velocity(self, current_image: np.ndarray, current_depth: np.ndarray, target_image: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
+    def compute_velocity(self, current_image: np.ndarray, current_depth: np.ndarray, target_image: np.ndarray, intrinsics: np.ndarray, current_pose: np.ndarray = None, target_pose: np.ndarray = None) -> np.ndarray:
         # 1. Extract and match features
         pts_curr, pts_target = self.matcher.match(current_image, target_image)
         
         if len(pts_curr) < 6:
             print(f"[FBVS] Warning: Not enough matches ({len(pts_curr)} < 6). Returning zero velocity.")
+            self.current_matches = (np.array([]), np.array([]))
+            return np.zeros(6, dtype=np.float64)
+
+        # 1.5 Apply NeRF-IBVS Stage 1 Filter: Reprojection Distance
+        if current_pose is not None and target_pose is not None and self.use_moge:
+            if getattr(self, 'target_depth', None) is None:
+                print("[FBVS] Caching target depth for reprojection filter...")
+                self.target_depth = self.depth_estimator.get_depth(target_image)
+                
+            fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+            cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+            h_t, w_t = self.target_depth.shape
+            
+            P_q_world = []
+            valid_mask = []
+            
+            for (u_t, v_t) in pts_target:
+                u_int = int(np.clip(round(u_t), 0, w_t - 1))
+                v_int = int(np.clip(round(v_t), 0, h_t - 1))
+                Z_t = self.target_depth[v_int, u_int]
+                
+                if Z_t <= 0.05 or not np.isfinite(Z_t):
+                    valid_mask.append(False)
+                    P_q_world.append([0, 0, 0])
+                else:
+                    valid_mask.append(True)
+                    X_c = (u_t - cx) * Z_t / fx
+                    Y_c = (v_t - cy) * Z_t / fy
+                    P_c = np.array([X_c, Y_c, Z_t, 1.0])
+                    P_w = target_pose @ P_c
+                    P_q_world.append(P_w[:3])
+            
+            valid_mask = np.array(valid_mask)
+            if np.sum(valid_mask) > 0:
+                pts_curr_f = pts_curr[valid_mask]
+                pts_target_f = pts_target[valid_mask]
+                P_q_world_f = np.array(P_q_world)[valid_mask]
+                
+                from VNAV.features.filters import filter_by_reprojection_distance
+                T_wc = np.linalg.inv(current_pose)
+                pts_curr_filtered, pts_target_filtered, _, inliers = filter_by_reprojection_distance(
+                    pts_curr_f, pts_target_f, P_q_world_f, T_wc, intrinsics, tau=200.0
+                )
+                
+                pts_curr = pts_curr_filtered
+                pts_target = pts_target_filtered
+                
+        if len(pts_curr) < 6:
+            print(f"[FBVS] Warning: Not enough matches after filter ({len(pts_curr)} < 6).")
+            self.current_matches = (np.array([]), np.array([]))
+            return np.zeros(6, dtype=np.float64)
+
+        # 1.6 Apply NeRF-IBVS Stage 2 Filter: RANSAC for Geometric Consistency
+        if len(pts_curr) >= 5:
+            import cv2
+            # findEssentialMat enforces epipolar geometry and handles non-collinear matching
+            E, inliers = cv2.findEssentialMat(pts_curr, pts_target, cameraMatrix=intrinsics, method=cv2.RANSAC, prob=0.99, threshold=3.0)
+            if inliers is not None:
+                inliers = inliers.ravel().astype(bool)
+                pts_curr = pts_curr[inliers]
+                pts_target = pts_target[inliers]
+
+        if len(pts_curr) < 6:
+            print(f"[FBVS] Warning: Not enough matches after filter ({len(pts_curr)} < 6).")
+            self.current_matches = (np.array([]), np.array([]))
             return np.zeros(6, dtype=np.float64)
 
         # 2. Retrieve Depth
@@ -54,6 +120,8 @@ class FBVSController(BaseController):
 
         L_e = []
         e = []
+        valid_pts_c = []
+        valid_pts_t = []
 
         # 3. Compute normalized coordinates and build Interaction Matrix
         h, w = depth_map.shape
@@ -72,6 +140,9 @@ class FBVSController(BaseController):
             # Skip invalid depths
             if Z <= 0.05 or not np.isfinite(Z):
                 continue 
+
+            valid_pts_c.append((u_c, v_c))
+            valid_pts_t.append((u_t, v_t))
 
             # Normalized image coordinates
             x_c = (u_c - cx) / fx
@@ -93,6 +164,7 @@ class FBVSController(BaseController):
 
         if valid_points_count < 6:
             print(f"[FBVS] Warning: Not enough valid depth points ({valid_points_count} < 6). Returning zero velocity.")
+            self.current_matches = (np.array([]), np.array([]))
             return np.zeros(6, dtype=np.float64)
 
         # Convert to numpy arrays
@@ -100,6 +172,7 @@ class FBVSController(BaseController):
         e = np.array(e)           # Shape: (2N,)
         
         self.current_error_norm = np.linalg.norm(e)
+        self.current_matches = (np.array(valid_pts_c), np.array(valid_pts_t))
 
         # 4. Compute control law: v_c = -lambda * pseudo_inverse(L_e) * e
         L_e_pinv = np.linalg.pinv(L_e)

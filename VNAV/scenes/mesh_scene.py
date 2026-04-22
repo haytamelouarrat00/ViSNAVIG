@@ -40,9 +40,15 @@ class MeshScene(BaseScene):
             warnings.warn("Renderer is not initialized. Returning a blank image.")
             return np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
-        # OffscreenRenderer setup_camera expects an intrinsic matrix and an extrinsic matrix
-        # Note: Open3D expects extrinsics as World-to-Camera
-        self.renderer.setup_camera(intrinsics, pose, self.width, self.height)
+        # Open3D expects extrinsics as World-to-Camera (T_wc)
+        # Ensure matrices are contiguous float64 for Open3D C++ bridge
+        intrinsics_64 = np.ascontiguousarray(intrinsics.astype(np.float64))
+        pose_64 = np.ascontiguousarray(pose.astype(np.float64))
+        
+        # setup_camera(intrinsic_matrix, extrinsic_matrix, width, height)
+        # Note: This has been observed to cause segmentation faults in some headless 
+        # environments with missing EGL/OpenGL drivers.
+        self.renderer.setup_camera(intrinsics_64, pose_64, self.width, self.height)
         
         img = self.renderer.render_to_image()
         return np.asarray(img)
@@ -57,7 +63,10 @@ class MeshScene(BaseScene):
             warnings.warn("Renderer is not initialized. Returning a blank depth image.")
             return np.zeros((self.height, self.width), dtype=np.float32)
 
-        self.renderer.setup_camera(intrinsics, pose, self.width, self.height)
+        intrinsics_64 = np.ascontiguousarray(intrinsics.astype(np.float64))
+        pose_64 = np.ascontiguousarray(pose.astype(np.float64))
+        
+        self.renderer.setup_camera(intrinsics_64, pose_64, self.width, self.height)
         
         depth_img = self.renderer.render_to_depth_image(z_in_view_space=True)
         return np.asarray(depth_img, dtype=np.float32)
