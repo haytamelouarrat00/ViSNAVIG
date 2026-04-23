@@ -2,20 +2,19 @@ import os
 import sys
 import numpy as np
 from PIL import Image
+import glob
 
 # Ensure the parent directory is in the Python path to allow `import *`
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scenes import GaussianScene, MeshScene
 from cameras import Camera
-from control import visual_servoing_loop
+from control import visual_servoing_loop, trajectory_servoing_loop
 from controllers.fbvs import FBVSController
 
 def run_3dgs_colmap():
     """
     Setup using 3D Gaussian Splatting and COLMAP Poses.
-    We pick a 'start' pose from the reconstruction to initialize the virtual camera,
-    and a 'target' real image from another index to servo towards.
     """
     print("--- Running 3DGS + COLMAP Setup ---")
     gs_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/gskitchen.ply"
@@ -41,45 +40,53 @@ def run_3dgs_colmap():
     cam = Camera.from_colmap(colmap_cameras_path, camera_id=colmap_camera_id)
     cam.set_pose_from_colmap(colmap_images_path, image_name=start_image.name)
 
-    # 2. Pick Target Image and Target Pose
-    target_index = start_index + 10  # Now guaranteed to be the next spatial frame!
-    target_image_info = posed_images[target_index]
-    target_image_path = os.path.join(images_dir, target_image_info.name)
-    print(f"Target Image: '{target_image_info.name}'")
-    
-    try:
-        real_target_img = np.array(Image.open(target_image_path).convert("RGB"))
-    except FileNotFoundError:
-        print(f"Error: Real target image '{target_image_path}' not found.")
-        return None, None, None, None
-
-    # Load target pose
-    target_cam = Camera.from_colmap(colmap_cameras_path, camera_id=target_image_info.camera_id)
-    target_cam.set_pose_from_colmap(colmap_images_path, image_name=target_image_info.name)
-    target_pose = target_cam.pose
-
-    # 3. Initialize Scene
+    # 2. Initialize Scene
     print("Initializing Gaussian Scene...")
     scene = GaussianScene(width=cam.width, height=cam.height)
     if not os.path.exists(gs_path):
         print(f"Please update paths. '{gs_path}' not found.")
-        return None, None, None, None
+        return None, None, None
     scene.load(gs_path)
     
-    return scene, cam, real_target_img, target_pose
+    # 3. Build trajectory
+    trajectory = []
+    print(f"Building trajectory with {len(posed_images) - start_index - 1} steps...")
+    
+    for i in range(start_index + 1, len(posed_images)):
+        target_image_info = posed_images[i]
+        target_image_path = os.path.join(images_dir, target_image_info.name)
+        
+        try:
+            real_target_img = np.array(Image.open(target_image_path).convert("RGB"))
+        except FileNotFoundError:
+            print(f"Error: Real target image '{target_image_path}' not found. Stopping trajectory.")
+            break
+
+        target_cam = Camera.from_colmap(colmap_cameras_path, camera_id=target_image_info.camera_id)
+        target_cam.set_pose_from_colmap(colmap_images_path, image_name=target_image_info.name)
+        target_pose = target_cam.pose
+        
+        trajectory.append((real_target_img, target_pose))
+
+    return scene, cam, trajectory
 
 
 def run_mesh_scannet():
     """
     Setup using Mesh Scene and ScanNet Poses.
-    We pick a 'start' pose from a .pose.txt file and a 'target' image from another frame.
     """
     print("--- Running Mesh + ScanNet Setup ---")
     mesh_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/akitchen.ply"
     info_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/info.txt"
-    start_pose_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000631.pose.txt"
-    target_image_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000640.color.jpg"
-    target_pose_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000640.pose.txt"
+    data_dir = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data"
+    
+    color_files = sorted(glob.glob(os.path.join(data_dir, "*.color.jpg")))
+    if not color_files:
+        print("No color images found in", data_dir)
+        return None, None, None
+        
+    start_image_path = color_files[0]
+    start_pose_path = start_image_path.replace(".color.jpg", ".pose.txt")
     
     # 1. Initialize Camera with Intrinsics from info.txt
     print("Loading Intrinsics...")
@@ -89,32 +96,39 @@ def run_mesh_scannet():
     print("Loading Start Pose...")
     cam.set_pose_from_scannet(start_pose_path)
     
-    # 3. Load Target Image
-    print(f"Target Image: '{target_image_path}'")
-    try:
-        real_target_img = np.array(Image.open(target_image_path).convert("RGB"))
-    except FileNotFoundError:
-        print(f"Error: Real target image '{target_image_path}' not found.")
-        return None, None, None, None
-
-    # Load target pose
-    target_cam = Camera.from_dataset_info(info_path, sensor_type='color')
-    try:
-        target_cam.set_pose_from_scannet(target_pose_path)
-        target_pose = target_cam.pose
-    except FileNotFoundError:
-        print(f"Warning: Target pose '{target_pose_path}' not found. Distance metrics will not be available.")
-        target_pose = None
-
-    # 4. Initialize Scene
+    # 3. Initialize Scene
     print("Initializing Mesh Scene...")
     scene = MeshScene(width=cam.width, height=cam.height)
     if not os.path.exists(mesh_path):
         print(f"Please update paths. '{mesh_path}' not found.")
-        return None, None, None, None
+        return None, None, None
     scene.load(mesh_path)
     
-    return scene, cam, real_target_img, target_pose
+    # 4. Build trajectory
+    trajectory = []
+    print(f"Building trajectory with {len(color_files) - 1} steps...")
+    
+    for i in range(1, len(color_files)):
+        target_image_path = color_files[i]
+        target_pose_path = target_image_path.replace(".color.jpg", ".pose.txt")
+        
+        try:
+            real_target_img = np.array(Image.open(target_image_path).convert("RGB"))
+        except FileNotFoundError:
+            print(f"Error: Real target image '{target_image_path}' not found.")
+            break
+
+        target_cam = Camera.from_dataset_info(info_path, sensor_type='color')
+        try:
+            target_cam.set_pose_from_scannet(target_pose_path)
+            target_pose = target_cam.pose
+        except FileNotFoundError:
+            print(f"Warning: Target pose '{target_pose_path}' not found. Distance metrics will not be available.")
+            target_pose = None
+            
+        trajectory.append((real_target_img, target_pose))
+        
+    return scene, cam, trajectory
 
 
 def main():
@@ -124,12 +138,12 @@ def main():
     # =========================================================================
     
     # [Option A] Run with 3DGS and COLMAP poses
-    # scene, cam, real_target_img, target_pose = run_3dgs_colmap()
+    scene, cam, trajectory = run_3dgs_colmap()
     
     # [Option B] Run with Mesh and ScanNet poses
-    scene, cam, real_target_img, target_pose = run_mesh_scannet()
+    # scene, cam, trajectory = run_mesh_scannet()
     
-    if scene is None or cam is None or real_target_img is None:
+    if scene is None or cam is None or not trajectory:
         print("Failed to initialize setup.")
         return
 
@@ -148,15 +162,12 @@ def main():
     # =========================================================================
     # START THE VISUAL SERVOING LOOP
     # =========================================================================
-    # The loop acts as a simple executor. It passes the views to the controller,
-    # receives the velocity, and moves the camera.
-    visual_servoing_loop(
+    trajectory_servoing_loop(
         scene=scene,
         camera=cam,
-        target_image=real_target_img,
+        trajectory=trajectory,
         controller=controller,
-        target_pose=target_pose,
-        max_iterations=300,
+        max_iterations_per_target=300,
         dt=0.1
     )
 

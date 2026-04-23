@@ -40,6 +40,15 @@ class FBVSController(BaseController):
         else:
             self.depth_estimator = None
             
+    def reset(self):
+        """Resets tracking state and iteration counter for a new target in the trajectory."""
+        self.iteration_count = 0
+        self.tracked_pts_target = None
+        self.tracked_P_q_world = None
+        self.current_matches = (np.array([]), np.array([]))
+        if hasattr(self, 'target_depth'):
+            self.target_depth = None
+
     def compute_velocity(self, current_image: np.ndarray, current_depth: np.ndarray, target_image: np.ndarray, intrinsics: np.ndarray, current_pose: np.ndarray = None, target_pose: np.ndarray = None) -> np.ndarray:
         should_match = (self.ratio == 1) or (self.ratio > 0 and self.iteration_count % self.ratio == 0) or (self.ratio == 0 and self.iteration_count == 0)
         
