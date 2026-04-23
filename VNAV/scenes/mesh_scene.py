@@ -1,72 +1,110 @@
-import open3d as o3d
+import os
+# Enforce headless rendering via EGL to avoid X11 errors on servers
+os.environ['PYOPENGL_PLATFORM'] = 'egl' 
+
 import numpy as np
 import warnings
+import pyrender
+import trimesh
 from .base_scene import BaseScene
 
 class MeshScene(BaseScene):
-    """Scene handler for 3D meshes using Open3D."""
+    """Scene handler for 3D meshes using Pyrender (robust headless EGL rendering)."""
 
     def __init__(self, width: int = 640, height: int = 480):
-        self.mesh = None
         self.width = width
         self.height = height
+        self.mesh = None
+        self.scene = None
+        self.mesh_node = None
         self.renderer = None
 
     def load(self, path: str) -> None:
-        """Loads a 3D mesh from a file using Open3D."""
-        self.mesh = o3d.io.read_triangle_mesh(path)
-        if not self.mesh.has_triangles():
-            raise ValueError(f"Failed to load mesh or mesh has no triangles: {path}")
-        
-        self.mesh.compute_vertex_normals()
-        
-        # Initialize the OffscreenRenderer
+        """Loads a 3D mesh from a file using Trimesh and sets up Pyrender."""
         try:
-            self.renderer = o3d.visualization.rendering.OffscreenRenderer(self.width, self.height)
-            material = o3d.visualization.rendering.MaterialRecord()
-            material.shader = "defaultLit"
-            self.renderer.scene.add_geometry("mesh", self.mesh, material)
+            # Load mesh with trimesh
+            tm = trimesh.load(path)
+            self.mesh = tm
+            
+            # Create pyrender mesh
+            mesh = pyrender.Mesh.from_trimesh(tm)
+            
+            # Initialize scene with moderate ambient light to avoid washing out colors
+            self.scene = pyrender.Scene(ambient_light=[0.4, 0.4, 0.4])
+            
+            # Add mesh to scene
+            self.mesh_node = self.scene.add(mesh)
+            
+            # Initialize renderer
+            self.renderer = pyrender.OffscreenRenderer(self.width, self.height)
+            
+            print(f"Loaded Mesh from {path} into Pyrender.")
         except Exception as e:
-            warnings.warn(f"Failed to initialize OffscreenRenderer (headless mode might require EGL): {e}")
+            warnings.warn(f"Failed to initialize Pyrender OffscreenRenderer: {e}")
+            self.scene = None
             self.renderer = None
+
+    def _run_render(self, pose: np.ndarray, intrinsics: np.ndarray):
+        if self.scene is None or self.renderer is None:
+            return None, None
+
+        # The input `pose` is the camera's extrinsic matrix (World-to-Camera, T_wc)
+        # Pyrender node poses expect Camera-to-World (T_cw)
+        T_cw = np.linalg.inv(pose)
+        
+        # Furthermore, Pyrender uses the OpenGL camera convention (Y up, Z back)
+        # Our extrinsics use the OpenCV camera convention (Y down, Z forward)
+        # We apply a 180-degree rotation around the X-axis to convert the coordinates
+        cv2gl = np.array([
+            [1.0,  0.0,  0.0, 0.0],
+            [0.0, -1.0,  0.0, 0.0],
+            [0.0,  0.0, -1.0, 0.0],
+            [0.0,  0.0,  0.0, 1.0]
+        ], dtype=np.float64)
+        
+        T_cw_gl = T_cw @ cv2gl
+
+        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+        
+        camera = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy)
+        camera_node = self.scene.add(camera, pose=T_cw_gl)
+        
+        # Add a directional light attached to the camera (headlamp) with soft intensity
+        light = pyrender.DirectionalLight(color=np.ones(3), intensity=1.5)
+        light_node = self.scene.add(light, pose=T_cw_gl)
+        
+        # Render the scene
+        color, depth = self.renderer.render(self.scene)
+        
+        # Clean up the camera and light nodes for the next frame
+        self.scene.remove_node(camera_node)
+        self.scene.remove_node(light_node)
+        
+        return color, depth
 
     def render(self, pose: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
         """Renders the mesh from the given pose."""
-        if self.mesh is None:
+        if self.scene is None:
             raise RuntimeError("Scene not loaded. Call load() first.")
             
-        if self.renderer is None:
-            # Fallback for environments without GUI/EGL support
-            warnings.warn("Renderer is not initialized. Returning a blank image.")
+        color, depth = self._run_render(pose, intrinsics)
+        
+        if color is None:
+            warnings.warn("Renderer failed. Returning a blank image.")
             return np.zeros((self.height, self.width, 3), dtype=np.uint8)
-
-        # Open3D expects extrinsics as World-to-Camera (T_wc)
-        # Ensure matrices are contiguous float64 for Open3D C++ bridge
-        intrinsics_64 = np.ascontiguousarray(intrinsics.astype(np.float64))
-        pose_64 = np.ascontiguousarray(pose.astype(np.float64))
-        
-        # setup_camera(intrinsic_matrix, extrinsic_matrix, width, height)
-        # Note: This has been observed to cause segmentation faults in some headless 
-        # environments with missing EGL/OpenGL drivers.
-        self.renderer.setup_camera(intrinsics_64, pose_64, self.width, self.height)
-        
-        img = self.renderer.render_to_image()
-        return np.asarray(img)
+            
+        return color.copy()
 
     def render_depth(self, pose: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
         """Renders the depth map of the mesh from the given pose."""
-        if self.mesh is None:
+        if self.scene is None:
             raise RuntimeError("Scene not loaded. Call load() first.")
             
-        if self.renderer is None:
-            # Fallback for environments without GUI/EGL support
-            warnings.warn("Renderer is not initialized. Returning a blank depth image.")
+        color, depth = self._run_render(pose, intrinsics)
+        
+        if depth is None:
+            warnings.warn("Renderer failed. Returning a blank depth image.")
             return np.zeros((self.height, self.width), dtype=np.float32)
-
-        intrinsics_64 = np.ascontiguousarray(intrinsics.astype(np.float64))
-        pose_64 = np.ascontiguousarray(pose.astype(np.float64))
-        
-        self.renderer.setup_camera(intrinsics_64, pose_64, self.width, self.height)
-        
-        depth_img = self.renderer.render_to_depth_image(z_in_view_space=True)
-        return np.asarray(depth_img, dtype=np.float32)
+            
+        return depth.astype(np.float32).copy()

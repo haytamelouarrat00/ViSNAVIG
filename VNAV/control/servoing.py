@@ -12,8 +12,8 @@ def visual_servoing_loop(
     target_image: np.ndarray,
     controller: BaseController,
     max_iterations: int = 200,
-    dt: float = 0.05,
-    error_tolerance: float = 0.2,
+    dt: float = 0.1,
+    error_tolerance: float = 0.001,
     velocity_epsilon: float = 1e-4,
     target_pose: np.ndarray = None
 ):
@@ -62,7 +62,7 @@ def visual_servoing_loop(
         # Check early stopping conditions
         stop_reason = None
         if e_norm > 0 and e_norm < error_tolerance:
-            stop_reason = f"Error norm ({e_norm:.6f}) below tolerance ({error_tolerance})"
+            stop_reason = f"Error norm ({e_norm:.7f}) below tolerance ({error_tolerance})"
         elif prev_v_c is not None:
             # Gradient is the norm of the change in velocity divided by the time step
             v_c_grad = np.linalg.norm(v_c - prev_v_c) / dt
@@ -122,9 +122,9 @@ def visual_servoing_loop(
                 tgt_rot = R.from_matrix(target_pose[:3, :3])
                 rel_rot = tgt_rot.inv() * curr_rot
                 angle_rad = np.linalg.norm(rel_rot.as_rotvec())
-                pose_error_str = f" | Dist: {dist_m:.3f} m | Angle: {angle_rad:.3f} rad"
+                pose_error_str = f" | Dist: {dist_m:.5f} m | Angle: {angle_rad:.5f} rad"
             except Exception as e:
-                pose_error_str = f" | Dist: {dist_m:.3f} m | Angle: Err"
+                pose_error_str = f" | Dist: {dist_m:.5f} m | Angle: Err"
         
         ax.set_title(
             f"Visual Servoing | Iter: {i+1}/{max_iterations} | FPS: {fps:.1f}\n"
@@ -140,7 +140,7 @@ def visual_servoing_loop(
             print(f"\nTarget reached at iteration {i+1}!")
             print(f"Reason: {stop_reason}")
             if target_pose is not None:
-                print(f"Final Distance: {dist_m:.4f} m, Final Angle: {angle_rad:.4f} rad")
+                print(f"Final Distance: {dist_m:.5f} m, Final Angle: {angle_rad:.5f} rad")
             break
             
     plt.ioff()

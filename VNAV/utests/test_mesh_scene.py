@@ -2,19 +2,23 @@ import unittest
 import numpy as np
 import open3d as o3d
 import os
+import tempfile
 from VNAV.scenes.mesh_scene import MeshScene
 
 class TestMeshScene(unittest.TestCase):
     def setUp(self):
         self.scene = MeshScene(width=320, height=240)
+        
+        # Use tempfile to avoid polluting the workspace root
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.test_mesh_path = os.path.join(self.temp_dir.name, "test_mesh.ply")
+        
         # Create a dummy mesh for testing
-        self.test_mesh_path = "test_mesh.ply"
         mesh = o3d.geometry.TriangleMesh.create_box()
         o3d.io.write_triangle_mesh(self.test_mesh_path, mesh)
 
     def tearDown(self):
-        if os.path.exists(self.test_mesh_path):
-            os.remove(self.test_mesh_path)
+        self.temp_dir.cleanup()
 
     def test_load_mesh(self):
         self.scene.load(self.test_mesh_path)

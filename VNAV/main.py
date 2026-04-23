@@ -3,7 +3,7 @@ import sys
 import numpy as np
 from PIL import Image
 
-# Ensure the parent directory is in the Python path to allow `import VNAV.*`
+# Ensure the parent directory is in the Python path to allow `import *`
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scenes import GaussianScene, MeshScene
@@ -75,7 +75,7 @@ def run_mesh_scannet():
     We pick a 'start' pose from a .pose.txt file and a 'target' image from another frame.
     """
     print("--- Running Mesh + ScanNet Setup ---")
-    mesh_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/mesh.ply" # Assuming there's a mesh here
+    mesh_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/akitchen.ply"
     info_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/info.txt"
     start_pose_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000631.pose.txt"
     target_image_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data/frame-000640.color.jpg"
@@ -141,7 +141,8 @@ def main():
     controller = FBVSController(
         lambda_gain=1.5,     # Adjust for convergence speed
         max_velocity=1.0,    # Max camera speed limit
-        use_moge=True        # True: Use MoGe-2, False: Use Ground Truth Z-Buffer
+        use_moge=True,       # True: Use MoGe-2, False: Use Ground Truth Z-Buffer
+        ratio=0              # 0 = detect once and reproject, 1 = redetect every frame, N = redetect every N frames
     )
 
     # =========================================================================
