@@ -14,7 +14,7 @@ from cameras import Camera
 from control import visual_servoing_loop, trajectory_servoing_loop
 from controllers.fbvs import FBVSController
 
-def run_3dgs_colmap():
+def run_3dgs_colmap(start_idx=0, end_idx=None):
     """
     Setup using 3D Gaussian Splatting and COLMAP Poses.
     """
@@ -30,9 +30,15 @@ def run_3dgs_colmap():
     # Sort images by their filename (name) to guarantee temporal and spatial sequentiality
     posed_images = sorted(reconstruction.images.values(), key=lambda img: img.name)
 
+    if end_idx is not None:
+        posed_images = posed_images[:end_idx]
+
+    if start_idx >= len(posed_images):
+        print(f"Error: start_idx ({start_idx}) >= number of images ({len(posed_images)}).")
+        return None, None, None
+
     # 1. Pick Start Pose
-    start_index = 0
-    start_image = posed_images[start_index]
+    start_image = posed_images[start_idx]
     colmap_camera_id = start_image.camera_id
 
     colmap_cameras_path = os.path.join(reconstruction_path, "cameras.bin")
@@ -52,9 +58,9 @@ def run_3dgs_colmap():
     
     # 3. Build trajectory
     trajectory = []
-    print(f"Building trajectory with {len(posed_images) - start_index - 1} steps...")
+    print(f"Building trajectory with {len(posed_images) - start_idx - 1} steps...")
     
-    for i in range(start_index + 1, len(posed_images)):
+    for i in range(start_idx + 1, len(posed_images)):
         target_image_info = posed_images[i]
         target_image_path = os.path.join(images_dir, target_image_info.name)
         
@@ -73,7 +79,7 @@ def run_3dgs_colmap():
     return scene, cam, trajectory
 
 
-def run_mesh_scannet():
+def run_mesh_scannet(start_idx=0, end_idx=None):
     """
     Setup using Mesh Scene and ScanNet Poses.
     """
@@ -83,11 +89,15 @@ def run_mesh_scannet():
     data_dir = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data"
     
     color_files = sorted(glob.glob(os.path.join(data_dir, "*.color.jpg")))
-    if not color_files:
-        print("No color images found in", data_dir)
+    
+    if end_idx is not None:
+        color_files = color_files[:end_idx]
+
+    if not color_files or start_idx >= len(color_files):
+        print(f"Error: start_idx ({start_idx}) >= number of images ({len(color_files)}) or no images found in {data_dir}.")
         return None, None, None
         
-    start_image_path = color_files[0]
+    start_image_path = color_files[start_idx]
     start_pose_path = start_image_path.replace(".color.jpg", ".pose.txt")
     
     # 1. Initialize Camera with Intrinsics from info.txt
@@ -108,9 +118,9 @@ def run_mesh_scannet():
     
     # 4. Build trajectory
     trajectory = []
-    print(f"Building trajectory with {len(color_files) - 1} steps...")
+    print(f"Building trajectory with {len(color_files) - start_idx - 1} steps...")
     
-    for i in range(1, len(color_files)):
+    for i in range(start_idx + 1, len(color_files)):
         target_image_path = color_files[i]
         target_pose_path = target_image_path.replace(".color.jpg", ".pose.txt")
         
@@ -153,6 +163,18 @@ def _parse_args():
         default=90,
         help="JPEG quality 1-100 (ignored for png). Default 90.",
     )
+    parser.add_argument(
+        "--start-idx",
+        type=int,
+        default=0,
+        help="Starting index for the trajectory (default: 0).",
+    )
+    parser.add_argument(
+        "--end-idx",
+        type=int,
+        default=None,
+        help="Ending index for the trajectory (default: None, goes to the end).",
+    )
     return parser.parse_args()
 
 
@@ -165,10 +187,10 @@ def main():
     # =========================================================================
 
     # [Option A] Run with 3DGS and COLMAP poses
-    # scene, cam, trajectory = run_3dgs_colmap()
+    # scene, cam, trajectory = run_3dgs_colmap(start_idx=args.start_idx, end_idx=args.end_idx)
 
     # [Option B] Run with Mesh and ScanNet poses
-    scene, cam, trajectory = run_mesh_scannet()
+    scene, cam, trajectory = run_mesh_scannet(start_idx=args.start_idx, end_idx=args.end_idx)
 
     if scene is None or cam is None or not trajectory:
         print("Failed to initialize setup.")

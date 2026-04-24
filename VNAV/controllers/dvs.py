@@ -58,6 +58,11 @@ class DVSController(BaseController):
         valid_flat = valid_mask.flatten()
         
         e = e_full.flatten()[valid_flat]
+        
+        self.current_error_norm = float(np.linalg.norm(e))
+        error_img_8u = (np.abs(e_full) * 255.0).astype(np.uint8)
+        self.current_error_image = cv2.cvtColor(cv2.applyColorMap(error_img_8u, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
+        
         Ix = Ix_full.flatten()[valid_flat]
         Iy = Iy_full.flatten()[valid_flat]
         x = x_full.flatten()[valid_flat]

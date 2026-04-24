@@ -64,9 +64,15 @@ class _AsyncFrameWriter:
             item = self.q.get()
             if item is self._SENTINEL:
                 break
-            path, rendered_img, target_resized = item
+            path, rendered_img, target_resized, error_img = item
             try:
-                combined = np.hstack((rendered_img, target_resized))
+                if error_img is not None:
+                    # Make sure error_img matches height and width
+                    if error_img.shape[:2] != rendered_img.shape[:2]:
+                        error_img = cv2.resize(error_img, (rendered_img.shape[1], rendered_img.shape[0]))
+                    combined = np.hstack((rendered_img, target_resized, error_img))
+                else:
+                    combined = np.hstack((rendered_img, target_resized))
                 bgr = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
                 if self.fmt in ("jpg", "jpeg"):
                     cv2.imwrite(path, bgr, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
@@ -76,8 +82,8 @@ class _AsyncFrameWriter:
                 # Printed on its own line so it doesn't collide with \r status.
                 print(f"\n[frame writer] failed for {path}: {e}")
 
-    def submit(self, path: str, rendered_img: np.ndarray, target_resized: np.ndarray):
-        self.q.put((path, rendered_img, target_resized))
+    def submit(self, path: str, rendered_img: np.ndarray, target_resized: np.ndarray, error_img: np.ndarray = None):
+        self.q.put((path, rendered_img, target_resized, error_img))
 
     def close(self):
         self.q.put(self._SENTINEL)
@@ -278,7 +284,8 @@ def visual_servoing_loop(
             # --- Per-iteration frame save (clean render|target, async) ---
             if frame_writer is not None:
                 frame_path = os.path.join(frames_dir, f"frame_{i:05d}.{ext}")
-                frame_writer.submit(frame_path, rendered_img, target_resized)
+                err_img = getattr(controller, 'current_error_image', None)
+                frame_writer.submit(frame_path, rendered_img, target_resized, err_img)
 
             v_norm = float(np.linalg.norm(v_c))
             e_norm = float(getattr(controller, 'current_error_norm', 0.0))
@@ -295,9 +302,16 @@ def visual_servoing_loop(
             prev_v_c = v_c.copy()
 
             fps = 1.0 / (time.time() - iter_start + 1e-5)
+            
+            pose_err_str = ""
+            if target_pose is not None:
+                dist_m, angle_rad = _pose_error(camera.pose, target_pose)
+                ang_str = f"{angle_rad:.4f}" if angle_rad is not None else "N/A"
+                pose_err_str = f" | Dist: {dist_m:.4f}m | Ang: {ang_str}rad"
+
             print(
                 f"\rIter {i+1}/{max_iterations} | FPS {fps:5.1f} "
-                f"| ||v_c|| {v_norm:.6e} | ||e|| {e_norm:.6e}",
+                f"| ||v_c|| {v_norm:.6e} | ||e|| {e_norm:.6e}{pose_err_str}",
                 end="", flush=True,
             )
 
@@ -439,7 +453,8 @@ def trajectory_servoing_loop(
                 # --- Per-iteration frame save (async, cached target resize) ---
                 if frame_writer is not None:
                     frame_path = os.path.join(frames_dir, f"frame_{global_iteration:05d}.{ext}")
-                    frame_writer.submit(frame_path, rendered_img, target_resized)
+                    err_img = getattr(controller, 'current_error_image', None)
+                    frame_writer.submit(frame_path, rendered_img, target_resized, err_img)
 
                 v_norm = float(np.linalg.norm(v_c))
                 e_norm = float(getattr(controller, 'current_error_norm', 0.0))
@@ -457,9 +472,16 @@ def trajectory_servoing_loop(
                 prev_v_c = v_c.copy()
 
                 fps = 1.0 / (time.time() - iter_start + 1e-5)
+                
+                pose_err_str = ""
+                if target_pose is not None:
+                    dist_m, angle_rad = _pose_error(camera.pose, target_pose)
+                    ang_str = f"{angle_rad:.4f}" if angle_rad is not None else "N/A"
+                    pose_err_str = f" | Dist: {dist_m:.4f}m | Ang: {ang_str}rad"
+
                 print(
                     f"\rTarget {target_idx+1}/{len(trajectory)} | Iter {i+1}/{max_iterations_per_target} "
-                    f"| FPS {fps:5.1f} | ||v_c|| {v_norm:.6e} | ||e|| {e_norm:.6e}",
+                    f"| FPS {fps:5.1f} | ||v_c|| {v_norm:.6e} | ||e|| {e_norm:.6e}{pose_err_str}",
                     end="", flush=True,
                 )
 
