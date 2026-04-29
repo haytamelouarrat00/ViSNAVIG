@@ -119,14 +119,15 @@ def main():
         trajectory=trajectory,
         controller=controller,
         max_iterations_per_target=300,
-        dt=0.1,
+        dt=1.0,
         output_dir=output_dir,
-        save_frames=False,
+        save_frames=True,
         save_trajectory=True,
         run_evo=True,
         frame_format="jpg",
         frame_quality=90,
-        error_tolerance = 50,
+        error_tolerance=0.0,
+        velocity_epsilon=1e-4,
     )
 
 if __name__ == "__main__":

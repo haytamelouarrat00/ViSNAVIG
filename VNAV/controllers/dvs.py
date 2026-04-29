@@ -1,27 +1,68 @@
-import numpy as np
+"""Direct (photometric) Visual Servoing controller."""
+
+from __future__ import annotations
+
 import cv2
+import numpy as np
+
 from .base_controller import BaseController
+
 
 class DVSController(BaseController):
     """
-    Direct Visual Servoing (DVS) Controller.
-    Computes camera velocity by directly minimizing the photometric (intensity) error 
-    between the current view and the target view.
+    Direct (Photometric) Visual Servoing (DVS) Controller.
+    Inspired by ViSP's vpServoLuminance. Computes the camera velocity directly from
+    image intensities (luminance) and depth without extracting geometric features.
     """
-    def __init__(self, lambda_gain: float = 1.0):
+
+    def __init__(self, lambda_gain: float = 1.0, *args, **kwargs) -> None:
+        """
+        Args:
+            lambda_gain (float): Control gain.
+        """
         self.lambda_gain = lambda_gain
-        
-    def compute_velocity(self, current_image: np.ndarray, current_depth: np.ndarray, target_image: np.ndarray, intrinsics: np.ndarray, current_pose: np.ndarray = None, target_pose: np.ndarray = None) -> np.ndarray:
-        # Convert images to grayscale and normalize to [0, 1]
+        self.current_error_norm: float = 0.0
+        self.current_error_image: np.ndarray | None = None
+
+    def reset(self) -> None:
+        """Resets the controller state."""
+        self.current_error_norm = 0.0
+        self.current_error_image = None
+
+    def compute_velocity(
+        self,
+        current_image: np.ndarray,
+        current_depth: np.ndarray,
+        target_image: np.ndarray,
+        intrinsics: np.ndarray,
+        current_pose: np.ndarray | None = None,
+        target_pose: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Computes the 6-DoF camera velocity command using photometric visual servoing.
+        """
+        # Convert to grayscale if necessary
         if current_image.ndim == 3:
-            curr_gray = cv2.cvtColor(current_image, cv2.COLOR_RGB2GRAY).astype(np.float64) / 255.0
+            curr_gray = cv2.cvtColor(current_image, cv2.COLOR_BGR2GRAY)
         else:
-            curr_gray = current_image.astype(np.float64) / 255.0
-            
+            curr_gray = current_image
+
         if target_image.ndim == 3:
-            targ_gray = cv2.cvtColor(target_image, cv2.COLOR_RGB2GRAY).astype(np.float64) / 255.0
+            targ_gray = cv2.cvtColor(target_image, cv2.COLOR_BGR2GRAY)
         else:
-            targ_gray = target_image.astype(np.float64) / 255.0
+            targ_gray = target_image
+
+        curr_gray = curr_gray.astype(np.float32)
+        targ_gray = targ_gray.astype(np.float32)
+
+        # Compute photometric error e = I - I*
+        error_image = curr_gray - targ_gray
+        self.current_error_image = error_image
+        self.current_error_norm = float(np.linalg.norm(error_image))
+
+        # Compute image gradients (central differences)
+        # grad_v is dI/dv (along rows/y-axis), grad_u is dI/du (along cols/x-axis)
+        grad_v, grad_u = np.gradient(curr_gray)
 
         fx = intrinsics[0, 0]
         fy = intrinsics[1, 1]
@@ -29,64 +70,42 @@ class DVSController(BaseController):
         cy = intrinsics[1, 2]
 
         H, W = curr_gray.shape
-        
-        # 1. Compute photometric error e = I_current - I_target
-        e_full = (curr_gray - targ_gray)
-        
-        # 2. Compute spatial image gradients (dI/du, dI/dv)
-        dI_dv, dI_du = np.gradient(curr_gray)
-        
-        # Scale to get Ix = dI/dx, Iy = dI/dy where x,y are normalized coordinates
-        Ix_full = fx * dI_du
-        Iy_full = fy * dI_dv
-        
-        # 3. Build dense Interaction Matrix L_e
-        u, v = np.meshgrid(np.arange(W), np.arange(H))
-        
-        x_full = (u - cx) / fx
-        y_full = (v - cy) / fy
-        
-        # Create a mask to discard border pixels and invalid depths (similarly to ViSP)
-        border = 10
-        valid_mask = (current_depth > 0)
-        valid_mask[:border, :] = False
-        valid_mask[-border:, :] = False
-        valid_mask[:, :border] = False
-        valid_mask[:, -border:] = False
-        
-        # Flatten valid entries
-        valid_flat = valid_mask.flatten()
-        
-        e = e_full.flatten()[valid_flat]
-        
-        self.current_error_norm = float(np.linalg.norm(e))
-        error_img_8u = (np.abs(e_full) * 255.0).astype(np.uint8)
-        self.current_error_image = cv2.cvtColor(cv2.applyColorMap(error_img_8u, cv2.COLORMAP_JET), cv2.COLOR_BGR2RGB)
-        
-        Ix = Ix_full.flatten()[valid_flat]
-        Iy = Iy_full.flatten()[valid_flat]
-        x = x_full.flatten()[valid_flat]
-        y = y_full.flatten()[valid_flat]
-        Z_inv = 1.0 / current_depth.flatten()[valid_flat]
-        
-        L_e = np.zeros((len(e), 6), dtype=np.float64)
-        L_e[:, 0] = Ix * Z_inv
-        L_e[:, 1] = Iy * Z_inv
-        L_e[:, 2] = -(x * Ix + y * Iy) * Z_inv
-        L_e[:, 3] = -Ix * x * y - (1.0 + y**2) * Iy
-        L_e[:, 4] = (1.0 + x**2) * Ix + Iy * x * y
-        L_e[:, 5] = Iy * x - Ix * y
-        
-        # 4. Compute velocity: v_c = -lambda * pseudo_inverse(L_e) * e
-        # To compute this efficiently: L_e^+ = (L_e^T * L_e)^-1 * L_e^T
-        H_mat = L_e.T @ L_e
-        J_err = L_e.T @ e
-        
-        try:
-            v_c = -self.lambda_gain * np.linalg.solve(H_mat, J_err)
-        except np.linalg.LinAlgError:
-            # Fallback to pseudo-inverse if singular
-            H_pinv = np.linalg.pinv(H_mat)
-            v_c = -self.lambda_gain * H_pinv @ J_err
-            
-        return v_c
+        u_coords, v_coords = np.meshgrid(np.arange(W), np.arange(H))
+
+        # Normalized coordinates
+        x = (u_coords - cx) / fx
+        y = (v_coords - cy) / fy
+
+        Z = current_depth
+
+        # Use only valid depth pixels to avoid division by zero or negative depths
+        valid_mask = Z > 0.01
+
+        # Flatten arrays for valid pixels
+        x_f = x[valid_mask]
+        y_f = y[valid_mask]
+        Z_f = Z[valid_mask]
+        grad_u_f = grad_u[valid_mask]
+        grad_v_f = grad_v[valid_mask]
+        e_f = error_image[valid_mask]
+
+        # Convert image gradients to normalized coordinate gradients as in ViSP
+        # Ix = px * dI/du, Iy = py * dI/dv
+        Ix = grad_u_f * fx
+        Iy = grad_v_f * fy
+
+        # Formulate Interaction Matrix L_I (N x 6)
+        L_vx = Ix / Z_f
+        L_vy = Iy / Z_f
+        L_vz = -(x_f * Ix + y_f * Iy) / Z_f
+        L_wx = -x_f * y_f * Ix - (1 + y_f**2) * Iy
+        L_wy = (1 + x_f**2) * Ix + x_f * y_f * Iy
+        L_wz = x_f * Iy - y_f * Ix
+
+        L = np.column_stack((L_vx, L_vy, L_vz, L_wx, L_wy, L_wz))
+
+        # Control law: v = -lambda * L^+ * e
+        # We solve L * v = -lambda * e
+        v, _, _, _ = np.linalg.lstsq(L, -self.lambda_gain * e_f, rcond=None)
+
+        return v.astype(np.float32)

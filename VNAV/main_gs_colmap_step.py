@@ -3,7 +3,6 @@ import sys
 import time
 import numpy as np
 from PIL import Image
-from bs4.builder import FAST
 
 # Ensure the parent directory is in the Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -99,7 +98,9 @@ def main():
         target_pose=target_pose,
         controller=controller,
         max_iterations=300,
-        dt=0.1,
+        dt=1.0,
+        error_tolerance=0.0,
+        velocity_epsilon=1e-4,
         output_dir=output_dir,
         save_frames=True,
         save_trajectory=True,

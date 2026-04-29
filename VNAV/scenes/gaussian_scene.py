@@ -116,15 +116,22 @@ class GaussianScene(BaseScene):
         return img
 
     def render_depth(self, pose: np.ndarray, intrinsics: np.ndarray) -> np.ndarray:
-        """Renders the depth map of the splats."""
+        """Renders the metric depth map (metres) of the splats.
+
+        The 2024+ Inria diff-gaussian-rasterizer emits alpha-composited *inverse*
+        depth at ``raster_out[2]`` (see ``forward.cu:395`` — ``expected_invdepth``).
+        We invert it to per-pixel depth and mask pixels with no Gaussian coverage
+        (invdepth ≈ 0) as 0, which downstream mask-based consumers treat as invalid.
+        """
         raster_out = self._run_rasterizer(pose, intrinsics)
-        
-        if len(raster_out) > 2:
-            # Assuming raster_out[2] is the depth map of shape (1, H, W)
-            depth_map = raster_out[2].squeeze(0).detach().cpu().numpy()
-            return depth_map.astype(np.float32)
-        else:
-            # Fallback if the rasterizer does not return depth natively
-            import warnings
-            warnings.warn("This version of diff-gaussian-rasterization does not return depth maps natively. Returning empty depth.")
-            return np.zeros((self.height, self.width), dtype=np.float32)
+
+        if len(raster_out) > 2 and raster_out[2].numel() > 0:
+            invdepth = raster_out[2].squeeze(0).detach().cpu().numpy().astype(np.float32)
+            depth = np.zeros_like(invdepth)
+            valid = invdepth > 1e-6
+            depth[valid] = 1.0 / invdepth[valid]
+            return depth
+
+        import warnings
+        warnings.warn("This version of diff-gaussian-rasterization does not return depth maps natively. Returning empty depth.")
+        return np.zeros((self.height, self.width), dtype=np.float32)

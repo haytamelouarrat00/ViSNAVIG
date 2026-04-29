@@ -70,6 +70,14 @@ class _AsyncFrameWriter:
                     # Make sure error_img matches height and width
                     if error_img.shape[:2] != rendered_img.shape[:2]:
                         error_img = cv2.resize(error_img, (rendered_img.shape[1], rendered_img.shape[0]))
+                    
+                    if error_img.ndim == 2 and rendered_img.ndim == 3:
+                        # Normalize error image for visualization
+                        err_norm = cv2.normalize(error_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                        error_img = cv2.cvtColor(err_norm, cv2.COLOR_GRAY2RGB)
+                    elif error_img.dtype != rendered_img.dtype:
+                        error_img = error_img.astype(rendered_img.dtype)
+                        
                     combined = np.hstack((rendered_img, target_resized, error_img))
                 else:
                     combined = np.hstack((rendered_img, target_resized))
