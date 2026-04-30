@@ -18,7 +18,7 @@ def run_mesh_scannet_step(start_idx=0, next_idx=1):
     Setup using Mesh Scene and ScanNet Poses for a single step (one index to the next).
     """
     print(f"--- Running Mesh + ScanNet Setup (Step: {start_idx} -> {next_idx}) ---")
-    mesh_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/akitchen.ply"
+    mesh_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/mesh_v2/mesh.ply"
     info_path = "/home/haytam-elourrat/VISNAV/DATA/kitchen/info.txt"
     data_dir = "/home/haytam-elourrat/VISNAV/DATA/kitchen/data"
     
@@ -65,7 +65,7 @@ def run_mesh_scannet_step(start_idx=0, next_idx=1):
 
 def main():
     # You can change the indices here to test different steps
-    scene, cam, target_image, target_pose = run_mesh_scannet_step(start_idx=0, next_idx=1)
+    scene, cam, target_image, target_pose = run_mesh_scannet_step(start_idx=0, next_idx=0)
     
     if scene is None or cam is None or target_image is None:
         print("Failed to initialize setup.")

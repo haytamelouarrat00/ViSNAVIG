@@ -70,14 +70,14 @@ class _AsyncFrameWriter:
                     # Make sure error_img matches height and width
                     if error_img.shape[:2] != rendered_img.shape[:2]:
                         error_img = cv2.resize(error_img, (rendered_img.shape[1], rendered_img.shape[0]))
-                    
+
                     if error_img.ndim == 2 and rendered_img.ndim == 3:
                         # Normalize error image for visualization
                         err_norm = cv2.normalize(error_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
                         error_img = cv2.cvtColor(err_norm, cv2.COLOR_GRAY2RGB)
                     elif error_img.dtype != rendered_img.dtype:
                         error_img = error_img.astype(rendered_img.dtype)
-                        
+
                     combined = np.hstack((rendered_img, target_resized, error_img))
                 else:
                     combined = np.hstack((rendered_img, target_resized))
@@ -203,21 +203,24 @@ def _pose_error(current_pose: np.ndarray, target_pose: np.ndarray):
 # -----------------------------------------------------------------------------
 
 def visual_servoing_loop(
-    scene: BaseScene,
-    camera: Camera,
-    target_image: np.ndarray,
-    controller: BaseController,
-    max_iterations: int = 200,
-    dt: float = 0.1,
-    error_tolerance: float = 5e-7,
-    velocity_epsilon: float = 1e-9,
-    target_pose: np.ndarray = None,
-    output_dir: str = None,
-    save_frames: bool = False,
-    save_trajectory: bool = True,
-    run_evo: bool = True,
-    frame_format: str = "jpg",
-    frame_quality: int = 90,
+        scene: BaseScene,
+        camera: Camera,
+        target_image: np.ndarray,
+        controller: BaseController,
+        max_iterations: int = 200,
+        dt: float = 0.1,
+        error_tolerance: float = 5e-7,
+        velocity_epsilon: float = 1e-9,
+        abort_factor: float = None,
+        abort_after_iter: int = 10,
+        abort_min_consecutive: int = 5,
+        target_pose: np.ndarray = None,
+        output_dir: str = None,
+        save_frames: bool = False,
+        save_trajectory: bool = True,
+        run_evo: bool = True,
+        frame_format: str = "jpg",
+        frame_quality: int = 90,
 ):
     """
     Executes the visual servoing control loop (headless).
@@ -228,6 +231,13 @@ def visual_servoing_loop(
         dt (float): Time step for velocity integration.
         error_tolerance (float): Stop when error norm falls below this.
         velocity_epsilon (float): Stop when velocity-gradient norm falls below this.
+        abort_factor (float): If set, abort when ``e_norm`` exceeds
+            ``abort_factor * e_min_seen`` for ``abort_min_consecutive``
+            consecutive iterations (after a warmup). ``None`` disables the check.
+        abort_after_iter (int): Iterations before the divergence check is armed.
+            ``e_min`` is built up during warmup but no abort can fire.
+        abort_min_consecutive (int): Required consecutive over-threshold iterations
+            before aborting. Filters out single-iter spikes.
         target_pose (np.ndarray): Ground truth 4x4 target pose (Camera-to-World).
         output_dir (str): If set, trajectories (and optionally frames) go here.
         save_frames (bool): Save per-iteration [render|target] frames. OFF by default.
@@ -253,6 +263,8 @@ def visual_servoing_loop(
     stop_reason = None
     final_i = 0
     target_resized = None  # cached on first iteration
+    e_min_seen = None
+    abort_streak = 0
     ext = "jpg" if frame_format.lower() in ("jpg", "jpeg") else "png"
     loop_start = time.time()
 
@@ -299,18 +311,36 @@ def visual_servoing_loop(
             e_norm = float(getattr(controller, 'current_error_norm', 0.0))
             final_i = i
 
+            # Divergence check (e_norm grew well above its running min for a streak)
+            if (abort_factor is not None and i >= abort_after_iter
+                    and e_min_seen is not None and e_min_seen > 0
+                    and e_norm > abort_factor * e_min_seen):
+                abort_streak += 1
+                if abort_streak >= abort_min_consecutive:
+                    stop_reason = (
+                        f"ABORTED: diverging (e_norm {e_norm:.3e} > "
+                        f"{abort_factor}x e_min {e_min_seen:.3e} for "
+                        f"{abort_streak} iters)"
+                    )
+            else:
+                abort_streak = 0
+
+            if e_norm > 0:
+                e_min_seen = e_norm if e_min_seen is None else min(e_min_seen, e_norm)
+
             # Check early stopping conditions
-            if e_norm > 0 and e_norm < error_tolerance:
-                stop_reason = f"Error norm ({e_norm:.9f}) below tolerance ({error_tolerance})"
-            elif prev_v_c is not None:
-                v_c_grad = float(np.linalg.norm(v_c - prev_v_c) / dt)
-                if v_c_grad < velocity_epsilon:
-                    stop_reason = f"Velocity gradient ({v_c_grad:.9f}) below epsilon ({velocity_epsilon})"
+            if stop_reason is None:
+                if e_norm > 0 and e_norm < error_tolerance:
+                    stop_reason = f"Error norm ({e_norm:.9f}) below tolerance ({error_tolerance})"
+                elif prev_v_c is not None:
+                    v_c_grad = float(np.linalg.norm(v_c - prev_v_c) / dt)
+                    if v_c_grad < velocity_epsilon:
+                        stop_reason = f"Velocity gradient ({v_c_grad:.9f}) below epsilon ({velocity_epsilon})"
 
             prev_v_c = v_c.copy()
 
             fps = 1.0 / (time.time() - iter_start + 1e-5)
-            
+
             pose_err_str = ""
             if target_pose is not None:
                 dist_m, angle_rad = _pose_error(camera.pose, target_pose)
@@ -318,7 +348,7 @@ def visual_servoing_loop(
                 pose_err_str = f" | Dist: {dist_m:.4f}m | Ang: {ang_str}rad"
 
             print(
-                f"\rIter {i+1}/{max_iterations} | FPS {fps:5.1f} "
+                f"\rIter {i + 1}/{max_iterations} | FPS {fps:5.1f} "
                 f"| ||v_c|| {v_norm:.6e} | ||e|| {e_norm:.6e}{pose_err_str}",
                 end="", flush=True,
             )
@@ -369,20 +399,23 @@ def visual_servoing_loop(
 
 
 def trajectory_servoing_loop(
-    scene: BaseScene,
-    camera: Camera,
-    trajectory: list,
-    controller: BaseController,
-    max_iterations_per_target: int = 200,
-    dt: float = 0.1,
-    error_tolerance: float = 5e-7,
-    velocity_epsilon: float = 1e-9,
-    output_dir: str = None,
-    save_frames: bool = False,
-    save_trajectory: bool = True,
-    run_evo: bool = True,
-    frame_format: str = "jpg",
-    frame_quality: int = 90,
+        scene: BaseScene,
+        camera: Camera,
+        trajectory: list,
+        controller: BaseController,
+        max_iterations_per_target: int = 200,
+        dt: float = 0.1,
+        error_tolerance: float = 5e-7,
+        velocity_epsilon: float = 1e-9,
+        abort_factor: float = None,
+        abort_after_iter: int = 10,
+        abort_min_consecutive: int = 5,
+        output_dir: str = None,
+        save_frames: bool = False,
+        save_trajectory: bool = True,
+        run_evo: bool = True,
+        frame_format: str = "jpg",
+        frame_quality: int = 90,
 ):
     """
     Executes the visual servoing control loop over a sequence of targets (headless).
@@ -392,6 +425,9 @@ def trajectory_servoing_loop(
         trajectory (list): [(target_image1, target_pose1), (target_image2, target_pose2), ...].
         max_iterations_per_target (int): Max iterations for each target.
         dt, error_tolerance, velocity_epsilon: same as ``visual_servoing_loop``.
+        abort_factor, abort_after_iter, abort_min_consecutive: per-target
+            divergence abort. See ``visual_servoing_loop`` for semantics. State
+            (``e_min``, streak counter) resets at the start of each target.
         output_dir (str): If set, trajectories (and optionally frames) go here.
         save_frames (bool): Save per-iteration [render|target] frames. OFF by default.
         save_trajectory (bool): Save estimated/ground-truth trajectories (TUM).
@@ -424,9 +460,11 @@ def trajectory_servoing_loop(
                 controller.reset()
 
             prev_v_c = None
-            stop_reason = None
+            stop_condition = None
             final_i = 0
             target_resized = None  # cached on first iteration of this waypoint
+            e_min_seen = None
+            abort_streak = 0
 
             for i in range(max_iterations_per_target):
                 iter_start = time.time()
@@ -446,18 +484,6 @@ def trajectory_servoing_loop(
 
                 camera.apply_velocity(v_c, dt=dt)
 
-                # Cache pose once per iteration.
-                current_pose = camera.pose
-
-                # --- Trajectory logging (post-update pose) ---
-                if output_dir is not None and save_trajectory:
-                    ts = global_iteration * dt
-                    est_timestamps.append(ts)
-                    est_poses.append(current_pose)
-                    if target_pose is not None:
-                        gt_timestamps.append(ts)
-                        gt_poses.append(np.asarray(target_pose, dtype=np.float64))
-
                 # --- Per-iteration frame save (async, cached target resize) ---
                 if frame_writer is not None:
                     frame_path = os.path.join(frames_dir, f"frame_{global_iteration:05d}.{ext}")
@@ -465,42 +491,72 @@ def trajectory_servoing_loop(
                     frame_writer.submit(frame_path, rendered_img, target_resized, err_img)
 
                 v_norm = float(np.linalg.norm(v_c))
-                e_norm = float(getattr(controller, 'current_error_norm', 0.0))
+                error_norm = float(getattr(controller, 'current_error_norm', 0.0))
 
                 global_iteration += 1
                 final_i = i
 
-                if e_norm > 0 and e_norm < error_tolerance:
-                    stop_reason = f"Error norm ({e_norm:.9f}) below tolerance ({error_tolerance})"
-                elif prev_v_c is not None:
-                    v_c_grad = float(np.linalg.norm(v_c - prev_v_c) / dt)
-                    if v_c_grad < velocity_epsilon:
-                        stop_reason = f"Velocity gradient ({v_c_grad:.9f}) below epsilon ({velocity_epsilon})"
+                # Divergence check (error_norm grew well above its running min for a streak)
+                if (abort_factor is not None and i >= abort_after_iter
+                        and e_min_seen is not None and e_min_seen > 0
+                        and error_norm > abort_factor * e_min_seen):
+                    abort_streak += 1
+                    if abort_streak >= abort_min_consecutive:
+                        stop_condition = (
+                            f"ABORTED: diverging (error_norm {error_norm:.3e} > "
+                            f"{abort_factor}x e_min {e_min_seen:.3e} for "
+                            f"{abort_streak} iters)"
+                        )
+                else:
+                    abort_streak = 0
+
+                if error_norm > 0:
+                    e_min_seen = error_norm if e_min_seen is None else min(e_min_seen, error_norm)
+
+                if stop_condition is None:
+                    if 0 < error_norm < error_tolerance:
+                        stop_condition = f"Error norm ({error_norm:.9f}) below tolerance ({error_tolerance})"
+                    elif prev_v_c is not None:
+                        v_c_grad = float(np.linalg.norm(v_c - prev_v_c) / dt)
+                        if v_c_grad < velocity_epsilon:
+                            stop_condition = f"Velocity gradient ({v_c_grad:.9f}) below epsilon ({velocity_epsilon})"
 
                 prev_v_c = v_c.copy()
 
                 fps = 1.0 / (time.time() - iter_start + 1e-5)
-                
+
                 pose_err_str = ""
                 if target_pose is not None:
                     dist_m, angle_rad = _pose_error(camera.pose, target_pose)
-                    ang_str = f"{angle_rad:.4f}" if angle_rad is not None else "N/A"
-                    pose_err_str = f" | Dist: {dist_m:.4f}m | Ang: {ang_str}rad"
+                    ang_str = f"{angle_rad:.6e}" if angle_rad is not None else "N/A"
+                    pose_err_str = f" | Dist: {dist_m:.6e}m | Ang: {ang_str}rad"
 
                 print(
-                    f"\rTarget {target_idx+1}/{len(trajectory)} | Iter {i+1}/{max_iterations_per_target} "
-                    f"| FPS {fps:5.1f} | ||v_c|| {v_norm:.6e} | ||e|| {e_norm:.6e}{pose_err_str}",
+                    f"\rTarget {target_idx + 1}/{len(trajectory)} | Iter {i + 1}/{max_iterations_per_target} "
+                    f"| FPS {fps:5.1f} | ||v_c|| {v_norm:.6e} | ||e|| {error_norm:.6e}{pose_err_str}",
                     end="", flush=True,
                 )
 
-                if stop_reason:
+                if stop_condition:
                     break
 
+            # --- Trajectory logging (one sample per target, after inner loop) ---
+            # Per-iteration logging produces hundreds of post-convergence jitter
+            # samples around each waypoint that dominate the evo plot. Logging
+            # once per target gives a clean waypoint trace.
+            if output_dir is not None and save_trajectory:
+                ts = target_idx * dt
+                est_timestamps.append(ts)
+                est_poses.append(camera.pose)
+                if target_pose is not None:
+                    gt_timestamps.append(ts)
+                    gt_poses.append(np.asarray(target_pose, dtype=np.float64))
+
             print()  # terminate the \r-updated status line
-            if stop_reason:
-                print(f"Target {target_idx+1} reached at iteration {final_i + 1}: {stop_reason}")
+            if stop_condition:
+                print(f"Target {target_idx + 1} reached at iteration {final_i + 1}: {stop_condition}")
             else:
-                print(f"Target {target_idx+1} did not converge within {max_iterations_per_target} iterations.")
+                print(f"Target {target_idx + 1} did not converge within {max_iterations_per_target} iterations.")
 
             if target_pose is not None:
                 dist_m, angle_rad = _pose_error(camera.pose, target_pose)
