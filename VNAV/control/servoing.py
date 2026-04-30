@@ -79,8 +79,11 @@ class _AsyncFrameWriter:
                         error_img = error_img.astype(rendered_img.dtype)
 
                     combined = np.hstack((rendered_img, target_resized, error_img))
-                else:
+                elif target_resized is not None:
                     combined = np.hstack((rendered_img, target_resized))
+                else:
+                    combined = rendered_img
+
                 bgr = cv2.cvtColor(combined, cv2.COLOR_RGB2BGR)
                 if self.fmt in ("jpg", "jpeg"):
                     cv2.imwrite(path, bgr, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
@@ -399,23 +402,24 @@ def visual_servoing_loop(
 
 
 def trajectory_servoing_loop(
-        scene: BaseScene,
-        camera: Camera,
-        trajectory: list,
-        controller: BaseController,
-        max_iterations_per_target: int = 200,
-        dt: float = 0.1,
-        error_tolerance: float = 5e-7,
-        velocity_epsilon: float = 1e-9,
-        abort_factor: float = None,
-        abort_after_iter: int = 10,
-        abort_min_consecutive: int = 5,
-        output_dir: str = None,
-        save_frames: bool = False,
-        save_trajectory: bool = True,
-        run_evo: bool = True,
-        frame_format: str = "jpg",
-        frame_quality: int = 90,
+    scene: BaseScene,
+    camera: Camera,
+    trajectory: list,
+    controller: BaseController,
+    max_iterations_per_target: int = 200,
+    dt: float = 0.1,
+    error_tolerance: float = 5e-7,
+    velocity_epsilon: float = 1e-9,
+    abort_factor: float = None,
+    abort_after_iter: int = 10,
+    abort_min_consecutive: int = 5,
+    output_dir: str = None,
+    save_frames: bool = False,
+    save_trajectory: bool = True,
+    run_evo: bool = True,
+    frame_format: str = "jpg",
+    frame_quality: int = 90,
+    start_target_idx: int = 0,
 ):
     """
     Executes the visual servoing control loop over a sequence of targets (headless).
@@ -429,13 +433,18 @@ def trajectory_servoing_loop(
             divergence abort. See ``visual_servoing_loop`` for semantics. State
             (``e_min``, streak counter) resets at the start of each target.
         output_dir (str): If set, trajectories (and optionally frames) go here.
-        save_frames (bool): Save per-iteration [render|target] frames. OFF by default.
+        save_frames (bool): Save per-iteration [render] frames. OFF by default.
         save_trajectory (bool): Save estimated/ground-truth trajectories (TUM).
         run_evo (bool): After the loop, run evo to produce comparison plots.
         frame_format (str): "jpg" (default, fast) or "png" (lossless, slow).
         frame_quality (int): JPEG quality (1-100); ignored for PNG.
+        start_target_idx (int): If resuming, start from this index in ``trajectory``.
     """
-    print(f"Starting Trajectory Servoing Loop for {len(trajectory)} targets...")
+    if start_target_idx >= len(trajectory):
+        print(f"Start target index {start_target_idx} is beyond trajectory length {len(trajectory)}. Nothing to do.")
+        return
+
+    print(f"Starting Trajectory Servoing Loop for targets {start_target_idx + 1} to {len(trajectory)}...")
 
     frames_dir = None
     if output_dir is not None:
@@ -444,6 +453,14 @@ def trajectory_servoing_loop(
     frame_writer = None
     if output_dir is not None and save_frames:
         frame_writer = _AsyncFrameWriter(fmt=frame_format, quality=frame_quality)
+
+    # Initialize trajectory files if needed (overwrite if starting fresh, append if resuming)
+    est_path = os.path.join(output_dir, "trajectory_estimated.txt") if output_dir and save_trajectory else None
+    gt_path = os.path.join(output_dir, "trajectory_groundtruth.txt") if output_dir and save_trajectory else None
+
+    if start_target_idx == 0:
+        if est_path: open(est_path, "w").close()
+        if gt_path: open(gt_path, "w").close()
 
     est_timestamps, est_poses = [], []
     gt_timestamps, gt_poses = [], []
@@ -454,7 +471,8 @@ def trajectory_servoing_loop(
 
     interrupted = False
     try:
-        for target_idx, (target_image, target_pose) in enumerate(trajectory):
+        for target_idx in range(start_target_idx, len(trajectory)):
+            target_image, target_pose = trajectory[target_idx]
             print(f"\n--- Moving to Target {target_idx + 1}/{len(trajectory)} ---")
             if hasattr(controller, 'reset'):
                 controller.reset()
@@ -483,12 +501,6 @@ def trajectory_servoing_loop(
                 )
 
                 camera.apply_velocity(v_c, dt=dt)
-
-                # --- Per-iteration frame save (async, cached target resize) ---
-                if frame_writer is not None:
-                    frame_path = os.path.join(frames_dir, f"frame_{global_iteration:05d}.{ext}")
-                    err_img = getattr(controller, 'current_error_image', None)
-                    frame_writer.submit(frame_path, rendered_img, target_resized, err_img)
 
                 v_norm = float(np.linalg.norm(v_c))
                 error_norm = float(getattr(controller, 'current_error_norm', 0.0))
@@ -540,17 +552,30 @@ def trajectory_servoing_loop(
                 if stop_condition:
                     break
 
+            # --- Final frame save for this target (comparison: Render vs Target) ---
+            if frame_writer is not None:
+                # Use target_idx to name the frame for clarity
+                frame_path = os.path.join(frames_dir, f"target_{target_idx + 1:04d}.{ext}")
+                # Final render from the camera
+                final_render = camera.render(scene)
+                # Show comparison: Render | Target
+                frame_writer.submit(frame_path, final_render, target_resized, None)
+
             # --- Trajectory logging (one sample per target, after inner loop) ---
-            # Per-iteration logging produces hundreds of post-convergence jitter
-            # samples around each waypoint that dominate the evo plot. Logging
-            # once per target gives a clean waypoint trace.
             if output_dir is not None and save_trajectory:
                 ts = target_idx * dt
                 est_timestamps.append(ts)
-                est_poses.append(camera.pose)
+                est_poses.append(camera.pose.copy())
+                
+                # Real-time appending to files
+                with open(est_path, "a") as f:
+                    f.write(_pose_to_tum_line(ts, camera.pose))
+                
                 if target_pose is not None:
                     gt_timestamps.append(ts)
                     gt_poses.append(np.asarray(target_pose, dtype=np.float64))
+                    with open(gt_path, "a") as f:
+                        f.write(_pose_to_tum_line(ts, target_pose))
 
             print()  # terminate the \r-updated status line
             if stop_condition:
@@ -571,15 +596,22 @@ def trajectory_servoing_loop(
     finally:
         if frame_writer is not None:
             frame_writer.close()
-        # Persist whatever was collected so a Ctrl+C still leaves usable artifacts.
-        if output_dir is not None and save_trajectory and est_poses:
-            est_path = os.path.join(output_dir, "trajectory_estimated.txt")
-            _save_tum_trajectory(est_path, est_timestamps, est_poses)
-            print(f"Saved estimated trajectory: {est_path} ({len(est_poses)} poses)")
-            if gt_poses:
-                gt_path = os.path.join(output_dir, "trajectory_groundtruth.txt")
-                _save_tum_trajectory(gt_path, gt_timestamps, gt_poses)
-                print(f"Saved ground-truth trajectory: {gt_path} ({len(gt_poses)} poses)")
+        
+        if output_dir is not None and save_trajectory:
+            total_est = 0
+            if est_path and os.path.exists(est_path):
+                with open(est_path, "r") as f:
+                    total_est = len(f.readlines())
+            
+            total_gt = 0
+            if gt_path and os.path.exists(gt_path):
+                with open(gt_path, "r") as f:
+                    total_gt = len(f.readlines())
+
+            if total_est > 0:
+                print(f"Final estimated trajectory saved to: {est_path} ({total_est} total waypoints)")
+            if total_gt > 0:
+                print(f"Final ground-truth trajectory saved to: {gt_path} ({total_gt} total waypoints)")
 
     print(f"\nTrajectory Tracking Finished ({time.time() - loop_start:.2f}s total).")
 

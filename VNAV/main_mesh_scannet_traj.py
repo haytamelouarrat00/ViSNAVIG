@@ -78,13 +78,55 @@ def main():
     parser = argparse.ArgumentParser(description="Run Mesh + ScanNet Trajectory")
     parser.add_argument("--start-idx", type=int, default=0, help="Starting index for the trajectory")
     parser.add_argument("--end-idx", type=int, default=None, help="Ending index for the trajectory")
+    parser.add_argument("--resume", type=str, help="Path to a previous run directory to resume from")
     args = parser.parse_args()
 
+    # Determine start_target_idx and output_dir
+    start_target_idx = 0
+    resume_dir = args.resume
+
+    if resume_dir:
+        if not os.path.isdir(resume_dir):
+            print(f"Error: Resume directory '{resume_dir}' does not exist.")
+            return
+
+        est_path = os.path.join(resume_dir, "trajectory_estimated.txt")
+        if not os.path.exists(est_path):
+            print(f"Error: Trajectory file '{est_path}' not found in resume directory.")
+            return
+
+        # Read last completed waypoint
+        with open(est_path, "r") as f:
+            lines = f.readlines()
+            if not lines:
+                print(f"Warning: Trajectory file '{est_path}' is empty. Starting from target 0.")
+            else:
+                last_line = lines[-1].strip().split()
+                # TUM format: timestamp tx ty tz qx qy qz qw
+                last_ts = float(last_line[0])
+                last_target_idx = int(round(last_ts))
+                start_target_idx = last_target_idx + 1
+
+                print(f"Resuming from target {start_target_idx + 1} based on {est_path}")
+
+                # Extract last pose from TUM line to set camera
+                t = np.array([float(last_line[1]), float(last_line[2]), float(last_line[3])])
+                q = np.array([float(last_line[4]), float(last_line[5]), float(last_line[6]), float(last_line[7])])
+                from scipy.spatial.transform import Rotation as R
+                rot = R.from_quat(q).as_matrix()
+                last_pose = np.eye(4)
+                last_pose[:3, :3] = rot
+                last_pose[:3, 3] = t
+
     scene, cam, trajectory = run_mesh_scannet_traj(start_idx=args.start_idx, end_idx=args.end_idx)
-    
+
     if scene is None or cam is None or not trajectory:
         print("Failed to initialize setup.")
         return
+
+    if resume_dir and 'last_pose' in locals():
+        print("Setting camera to last known pose from trajectory...")
+        cam.pose = last_pose
 
     controller = FBVSController(
         lambda_gain=1.5,
@@ -93,12 +135,16 @@ def main():
         ratio=0
     )
 
-    run_stamp = time.strftime("%Y%m%d_%H%M%S")
-    output_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "RUNS",
-        run_stamp,
-    )
+    if resume_dir:
+        output_dir = resume_dir
+    else:
+        run_stamp = time.strftime("%Y%m%d_%H%M%S")
+        output_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "RUNS",
+            run_stamp,
+        )
+
     print(f"Run outputs will be written to: {output_dir}")
 
     trajectory_servoing_loop(
@@ -106,7 +152,7 @@ def main():
         camera=cam,
         trajectory=trajectory,
         controller=controller,
-        max_iterations_per_target=150,
+        max_iterations_per_target=300,
         dt=1.0,
         output_dir=output_dir,
         save_frames=True,
@@ -114,6 +160,7 @@ def main():
         run_evo=True,
         frame_format="jpg",
         frame_quality=90,
+        start_target_idx=start_target_idx
     )
 
 if __name__ == "__main__":
